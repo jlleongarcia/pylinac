@@ -218,13 +218,16 @@ class MachineLogs(list):
         for further parameter info."""
         self._check_empty()
         gamma_list = np.zeros(self.num_logs)
+        mu_list = np.zeros(self.num_logs)
 
         for num, log in enumerate(self):
             log.fluence.gamma.calc_map(doseTA, distTA, threshold, resolution)
             gamma_list[num] = log.fluence.gamma.avg_gamma
+            mu_list[num] = np.max(log.axis_data.mu.expected)
+            gamma_overall = np.sum(gamma_list * mu_list)/np.sum(mu_list)
             print(f"Calculating gammas: {num+1} of {self.num_logs}", end="\r")
         print("")
-        return gamma_list.mean()
+        return gamma_overall
 
     def avg_gamma_pct(
         self,
@@ -237,15 +240,18 @@ class MachineLogs(list):
         for further parameter info."""
         self._check_empty()
         gamma_list = np.zeros(self.num_logs)
+        mu_list = np.zeros(self.num_logs)
 
         for num, log in enumerate(self):
             log.fluence.gamma.calc_map(doseTA, distTA, threshold, resolution)
             gamma_list[num] = log.fluence.gamma.pass_prcnt
+            mu_list[num] = np.max(log.axis_data.mu.expected)
+            gamma_overall = np.sum(gamma_list * mu_list)/np.sum(mu_list)
             print(
                 f"Calculating gamma pass percent: {num+1} of {self.num_logs}", end="\r"
             )
         print("")
-        return gamma_list.mean()
+        return gamma_overall
 
     def to_csv(self) -> list[str]:
         """Write trajectory logs to CSV. If there are both dynalogs and trajectory logs,
@@ -732,8 +738,8 @@ class GammaFluence(FluenceBase):
 
         actual_img = image.load(self._actual_fluence.array, dpi=25.4 / resolution)
         expected_img = image.load(self._expected_fluence.array, dpi=25.4 / resolution)
-        gamma_map = actual_img.gamma(
-            expected_img, doseTA=doseTA, distTA=distTA, threshold=threshold
+        gamma_map = expected_img.gamma(
+            actual_img, doseTA=doseTA, distTA=distTA, threshold=threshold
         )
 
         # calculate standard metrics
