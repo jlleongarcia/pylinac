@@ -783,7 +783,7 @@ class BaseImage:
         distTA: float = 1,
         threshold: float = 0.1,
         ground: bool = True,
-        normalize: bool = True,
+        normalize: bool = False,
     ) -> np.ndarray:
         """Calculate the gamma between the current image (reference) and a comparison image.
 
@@ -849,7 +849,7 @@ class BaseImage:
         # invalidate dose values below threshold so gamma doesn't calculate over it
         ref_img.array[ref_img < threshold * np.max(ref_img)] = np.NaN
 
-        # convert distance value from mm to pixels
+        # convert distance value from mm to pixels and translate it to MLC plane
         distTA_pixels = self.dpmm * distTA
 
         # construct image gradient using sobel filter
@@ -859,9 +859,13 @@ class BaseImage:
 
         # equation: (measurement - reference) / sqrt ( doseTA^2 + distTA^2 * image_gradient^2 )
         subtracted_img = np.abs(comp_img - ref_img)
-        denominator = np.sqrt(
-            ((doseTA / 100.0) ** 2) + ((distTA_pixels**2) * (grad_img**2))
-        )
+        
+        if normalize:
+            aux_ref = 1
+        else:
+            aux_ref = np.hypot(ref_img/np.sqrt(2), ref_img/np.sqrt(2))
+            
+        denominator = np.sqrt((aux_ref ** 2 * (doseTA / 100.0) ** 2) + (distTA_pixels**2 * grad_img**2))
         gamma_map = subtracted_img / denominator
 
         return gamma_map
@@ -892,11 +896,10 @@ class BaseImage:
             metrics = [metrics]
         for metric in metrics:
             metric.inject_image(self)
-            value = metric.context_calculate()
             self.metrics.append(metric)
+            value = metric.context_calculate()
             metric_data[metric.name] = value
-        # TODO: use |= when 3.9 is min supported version
-        self.metric_values.update(metric_data)
+        self.metric_values |= metric_data
         if len(metrics) == 1:
             return metric_data[metrics[0].name]
         return metric_data
