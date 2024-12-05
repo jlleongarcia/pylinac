@@ -213,6 +213,7 @@ class MachineLogs(list):
         distTA: int | float = 1,
         threshold: int | float = 0.1,
         resolution: int | float = 0.1,
+        normalize: bool = False
     ) -> float:
         """Calculate and return the average gamma of all logs. See :meth:`~pylinac.log_analyzer.GammaFluence.calc_map()`
         for further parameter info."""
@@ -221,7 +222,7 @@ class MachineLogs(list):
         mu_list = np.zeros(self.num_logs)
 
         for num, log in enumerate(self):
-            log.fluence.gamma.calc_map(doseTA, distTA, threshold, resolution)
+            log.fluence.gamma.calc_map(doseTA, distTA, threshold, resolution, normalize)
             gamma_list[num] = log.fluence.gamma.avg_gamma
             mu_list[num] = np.max(log.axis_data.mu.expected)
             gamma_overall = np.sum(gamma_list * mu_list)/np.sum(mu_list)
