@@ -62,6 +62,8 @@ def noise_power_spectrum_2d(
     -------
     nps2d : ndarray
         The 2D noise power spectrum.
+    mean_pv : float
+        The mean pixel value of the large ROI. Used for NNPS calculations.
 
     References
     ----------
