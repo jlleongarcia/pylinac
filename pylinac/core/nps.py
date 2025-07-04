@@ -35,7 +35,7 @@ def radial_average(arr: np.ndarray) -> np.ndarray:
 
 def noise_power_spectrum_2d(
     image_array: np.ndarray, pixel_size: float, big_roi_size: int, small_roi_size: int
-) -> np.ndarray:
+) -> tuple[np.ndarray, float]:
     """Calculate the noise power spectrum in 2D and 1D for a set of square ROIs.
 
     Based on ICRU 87, equation 11.1 and 11.2, and on IEC 62220-1-1:2015 described method. For a given image,
