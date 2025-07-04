@@ -84,8 +84,8 @@ def noise_power_spectrum_2d(
         # 2. Divide the big ROI into smaller, overlapping ROIs
         rois_list = []
 
-        for y in range(0, int(np.floor(big_roi_size / small_roi_size) * small_roi_size), int(small_roi_size / 2)):
-            for x in range(0, int(np.floor(big_roi_size / small_roi_size) * small_roi_size), int(small_roi_size / 2)):
+        for y in range(0, big_roi_size - small_roi_size + 1, int(small_roi_size / 2)):
+            for x in range(0, big_roi_size - small_roi_size + 1, int(small_roi_size / 2)):
                 small_roi = big_roi[y : y + small_roi_size, x : x + small_roi_size]
                 rois_list.append(small_roi)
 
