@@ -91,8 +91,7 @@ def noise_power_spectrum_2d(
 
         return rois_list, big_roi
 
-    rois, _ = extract_rois_from_image(image_array, big_roi_size, small_roi_size)
-    big_roi = big_roi
+    rois, big_roi = extract_rois_from_image(image_array, big_roi_size, small_roi_size)
 
     ffts = np.zeros((small_roi_size, small_roi_size, len(rois)))
     for idx, roi in enumerate(rois):
