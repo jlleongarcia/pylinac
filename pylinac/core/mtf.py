@@ -460,14 +460,13 @@ class EdgeMTF:
         distances = perpendicular_dist.flatten()
         intensities = self.edge_data_norm.flatten()
         
-        # Create oversampled bins (typically 4x oversampling as per IEC standard)
+        # Create oversampled bins (4x oversampling as per IEC 62220-1-1:2015)
         oversampling_factor = 4
         min_dist, max_dist = distances.min(), distances.max()
         n_bins = int((max_dist - min_dist) * oversampling_factor)
         
-        # Ensure we have enough bins for meaningful analysis
-        if n_bins < 20:
-            n_bins = 100
+        # Inform user about binning
+        print(f"ESF extraction: Creating {n_bins} bins with {oversampling_factor}x oversampling")
         
         bin_edges = np.linspace(min_dist, max_dist, n_bins + 1)
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
