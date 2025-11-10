@@ -9,6 +9,8 @@ import numpy as np
 import plotly.graph_objects as go
 from matplotlib import pyplot as plt
 from scipy.interpolate import interp1d
+from scipy.ndimage import sobel, gaussian_filter1d
+from scipy.optimize import curve_fit
 
 from .contrast import michelson
 from .plotly_utils import add_title
@@ -297,3 +299,473 @@ class MomentMTF:
         spacing_ax.set_xlabel("Pair Distance (mm)")
         plt.tight_layout()
         return axis
+
+
+class EdgeMTF:
+    """MTF calculation using the edge method according to IEC 62220-1-1:2015.
+    
+    This class implements the slanted edge method for calculating the Modulation 
+    Transfer Function (MTF) as described in IEC 62220-1-1:2015. The method involves:
+    
+    1. Edge detection and angle determination (should be 3-5 degrees from vertical/horizontal)
+    2. Edge Spread Function (ESF) extraction
+    3. Differentiation to obtain Line Spread Function (LSF)
+    4. Fourier Transform to calculate MTF
+    
+    The implementation provides robust edge detection, oversampling, and proper
+    windowing to ensure accurate MTF calculation.
+    
+    Parameters
+    ----------
+    edge_data : np.ndarray
+        2D array containing the edge image. The edge should be slanted at 
+        approximately 3-5 degrees from vertical or horizontal.
+    pixel_size : float
+        Physical pixel size in mm. Used to convert spatial frequencies to mm^-1.
+    edge_threshold : float, optional
+        Threshold value for edge detection (0-1 range for normalized data).
+        If None, will use automatic threshold (mean of image).
+    edge_smoothing : float, optional
+        Gaussian smoothing sigma for edge detection. Default is 1.0.
+    """
+    
+    def __init__(
+        self,
+        edge_data: np.ndarray,
+        pixel_size: float,
+        edge_threshold: float | None = None,
+        edge_smoothing: float = 1.0,
+    ):
+        """Initialize EdgeMTF with edge phantom image data."""
+        if edge_data.ndim != 2:
+            raise ValueError("Edge data must be a 2D array")
+        if pixel_size <= 0:
+            raise ValueError("Pixel size must be positive")
+        
+        self.edge_data = edge_data.astype(float)
+        self.pixel_size = pixel_size
+        self.edge_smoothing = edge_smoothing
+        
+        # Normalize edge data to 0-1 range for processing
+        self.edge_data_norm = (self.edge_data - self.edge_data.min()) / (
+            self.edge_data.max() - self.edge_data.min()
+        )
+        
+        # Set threshold for edge detection
+        if edge_threshold is None:
+            self.edge_threshold = np.mean(self.edge_data_norm)
+        else:
+            if not 0 <= edge_threshold <= 1:
+                raise ValueError("Edge threshold must be between 0 and 1")
+            self.edge_threshold = edge_threshold
+        
+        # Calculate MTF
+        self._calculate_mtf()
+    
+    def _find_edge_angle(self) -> tuple[float, bool]:
+        """Find the angle of the edge and determine orientation.
+        
+        Returns
+        -------
+        angle : float
+            Angle of the edge in radians relative to vertical
+        is_vertical : bool
+            True if edge is closer to vertical, False if closer to horizontal
+        """
+        # Use Sobel operators to find edge gradient
+        sobel_h = sobel(self.edge_data_norm, axis=0)  # horizontal gradients
+        sobel_v = sobel(self.edge_data_norm, axis=1)  # vertical gradients
+        
+        # Find edge points above threshold
+        gradient_magnitude = np.sqrt(sobel_h**2 + sobel_v**2)
+        edge_threshold_grad = np.percentile(gradient_magnitude, 90)
+        edge_points = gradient_magnitude > edge_threshold_grad
+        
+        if not edge_points.any():
+            raise ValueError(
+                "Could not detect edge in image. Ensure edge has sufficient contrast."
+            )
+        
+        # Get coordinates of edge points
+        y_coords, x_coords = np.where(edge_points)
+        
+        if len(y_coords) < 10:
+            raise ValueError(
+                "Insufficient edge points detected. Check image quality and contrast."
+            )
+        
+        # Fit a line to edge points to determine angle
+        # y = mx + b -> angle = arctan(m)
+        coeffs = np.polyfit(x_coords, y_coords, 1)
+        slope = coeffs[0]
+        angle = np.arctan(slope)
+        
+        # Determine if edge is primarily vertical or horizontal
+        # Vertical edge: angle close to ±90°, horizontal edge: angle close to 0°
+        is_vertical = abs(angle) > np.pi / 4
+        
+        # Check if angle is in acceptable range (3-5 degrees from vertical/horizontal)
+        angle_deg = abs(np.degrees(angle))
+        if is_vertical:
+            angle_from_vertical = abs(90 - angle_deg)
+            if angle_from_vertical > 10:
+                warnings.warn(
+                    f"Edge angle ({angle_from_vertical:.1f}° from vertical) is outside "
+                    f"recommended range (3-5°). Results may be less accurate."
+                )
+        else:
+            if angle_deg > 10:
+                warnings.warn(
+                    f"Edge angle ({angle_deg:.1f}° from horizontal) is outside "
+                    f"recommended range (3-5°). Results may be less accurate."
+                )
+        
+        return angle, is_vertical
+    
+    def _extract_esf(self, angle: float, is_vertical: bool) -> tuple[np.ndarray, np.ndarray]:
+        """Extract Edge Spread Function by projecting perpendicular to edge.
+        
+        Parameters
+        ----------
+        angle : float
+            Angle of the edge in radians
+        is_vertical : bool
+            Whether the edge is primarily vertical
+            
+        Returns
+        -------
+        positions : np.ndarray
+            Positions along the edge (in pixels, oversampled)
+        esf : np.ndarray
+            Edge Spread Function values
+        """
+        rows, cols = self.edge_data_norm.shape
+        
+        # Create coordinate grids
+        y, x = np.mgrid[0:rows, 0:cols]
+        
+        # Calculate perpendicular distance to edge for each pixel
+        # For a line at angle theta passing through center:
+        # perpendicular distance = x*sin(theta) - y*cos(theta) + offset
+        center_y, center_x = rows / 2, cols / 2
+        
+        if is_vertical:
+            # For vertical edge, project onto horizontal axis
+            perpendicular_dist = (x - center_x) * np.sin(angle) - (y - center_y) * np.cos(angle)
+        else:
+            # For horizontal edge, project onto vertical axis
+            perpendicular_dist = (y - center_y) * np.sin(angle) + (x - center_x) * np.cos(angle)
+        
+        # Flatten arrays
+        distances = perpendicular_dist.flatten()
+        intensities = self.edge_data_norm.flatten()
+        
+        # Create oversampled bins (typically 4x oversampling as per IEC standard)
+        oversampling_factor = 4
+        min_dist, max_dist = distances.min(), distances.max()
+        n_bins = int((max_dist - min_dist) * oversampling_factor)
+        
+        # Ensure we have enough bins for meaningful analysis
+        if n_bins < 20:
+            n_bins = 100
+        
+        bin_edges = np.linspace(min_dist, max_dist, n_bins + 1)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        # Bin the data to create ESF
+        esf = np.zeros(n_bins)
+        counts = np.zeros(n_bins)
+        
+        for i in range(n_bins):
+            mask = (distances >= bin_edges[i]) & (distances < bin_edges[i + 1])
+            if mask.any():
+                esf[i] = np.mean(intensities[mask])
+                counts[i] = np.sum(mask)
+        
+        # Remove bins with no data
+        valid_bins = counts > 0
+        if valid_bins.sum() < 10:
+            raise ValueError(
+                "Insufficient data for ESF calculation. Check edge image quality."
+            )
+        
+        esf = esf[valid_bins]
+        positions = bin_centers[valid_bins]
+        
+        # Sort by position
+        sort_idx = np.argsort(positions)
+        positions = positions[sort_idx]
+        esf = esf[sort_idx]
+        
+        return positions, esf
+    
+    def _calculate_lsf(self, esf: np.ndarray) -> np.ndarray:
+        """Calculate Line Spread Function by differentiating ESF.
+        
+        Parameters
+        ----------
+        esf : np.ndarray
+            Edge Spread Function
+            
+        Returns
+        -------
+        lsf : np.ndarray
+            Line Spread Function
+        """
+        # Differentiate ESF to get LSF
+        # Use central differences for better accuracy
+        lsf = np.gradient(esf)
+        
+        # Apply Hamming window to reduce ringing artifacts (IEC recommendation)
+        window = np.hamming(len(lsf))
+        lsf_windowed = lsf * window
+        
+        return lsf_windowed
+    
+    def _calculate_mtf(self):
+        """Calculate MTF from edge data following IEC 62220-1-1:2015."""
+        # Step 1: Find edge angle
+        angle, is_vertical = self._find_edge_angle()
+        self.edge_angle = angle
+        self.is_vertical = is_vertical
+        
+        # Step 2: Extract ESF
+        positions, esf = self._extract_esf(angle, is_vertical)
+        self.esf_positions = positions
+        self.esf = esf
+        
+        # Step 3: Calculate LSF
+        lsf = self._calculate_lsf(esf)
+        self.lsf = lsf
+        
+        # Step 4: Calculate MTF via FFT
+        # Zero-pad to increase frequency resolution
+        n_fft = 2 ** int(np.ceil(np.log2(len(lsf) * 2)))
+        lsf_padded = np.zeros(n_fft)
+        lsf_padded[:len(lsf)] = lsf
+        
+        # Take FFT
+        mtf_complex = np.fft.fft(lsf_padded)
+        mtf = np.abs(mtf_complex)
+        
+        # Normalize so MTF(0) = 1
+        mtf = mtf / mtf[0] if mtf[0] != 0 else mtf
+        
+        # Calculate frequency axis
+        # Pixel spacing in position array
+        pixel_spacing = np.mean(np.diff(positions))
+        # Nyquist frequency in cycles per mm
+        nyquist_freq = 1 / (2 * self.pixel_size * pixel_spacing)
+        # Frequency array
+        freqs = np.fft.fftfreq(n_fft, d=pixel_spacing * self.pixel_size)
+        
+        # Take only positive frequencies up to Nyquist
+        positive_freqs = freqs >= 0
+        self.frequencies = freqs[positive_freqs]
+        self.mtf_values = mtf[positive_freqs]
+        
+        # Limit to Nyquist frequency
+        nyquist_mask = self.frequencies <= nyquist_freq
+        self.frequencies = self.frequencies[nyquist_mask]
+        self.mtf_values = self.mtf_values[nyquist_mask]
+    
+    @argue.bounds(percent=(0, 100))
+    def spatial_resolution(self, percent: float = 50) -> float:
+        """Return the spatial frequency at the given MTF percentage.
+        
+        Parameters
+        ----------
+        percent : float
+            The MTF percentage (0-100) at which to find the spatial frequency.
+            Common values are 50 (MTF50) and 10 (MTF10).
+            
+        Returns
+        -------
+        frequency : float
+            The spatial frequency in cycles/mm at the given MTF percentage.
+        """
+        target_mtf = percent / 100
+        
+        # Find where MTF crosses the target value
+        if target_mtf > self.mtf_values[0]:
+            warnings.warn(
+                f"Target MTF {percent}% is higher than MTF(0). Returning 0."
+            )
+            return 0.0
+        
+        if target_mtf < self.mtf_values[-1]:
+            warnings.warn(
+                f"MTF does not reach {percent}% within the measured frequency range. "
+                f"Result is extrapolated."
+            )
+        
+        # Interpolate to find frequency at target MTF
+        # MTF decreases with frequency, so we need to reverse for interpolation
+        f = interp1d(
+            self.mtf_values[::-1],
+            self.frequencies[::-1],
+            kind='linear',
+            fill_value='extrapolate'
+        )
+        
+        frequency = f(target_mtf)
+        return float(frequency)
+    
+    def plotly(
+        self,
+        fig: go.Figure | None = None,
+        x_label: str = "Spatial Frequency (cycles/mm)",
+        y_label: str = "MTF",
+        title: str = "Edge-based MTF (IEC 62220-1-1:2015)",
+        name: str = "MTF",
+        **kwargs,
+    ) -> go.Figure:
+        """Plot the MTF using plotly.
+        
+        Parameters
+        ----------
+        fig : go.Figure, optional
+            Existing figure to add trace to. If None, creates new figure.
+        x_label : str
+            Label for x-axis
+        y_label : str
+            Label for y-axis
+        title : str
+            Plot title
+        name : str
+            Name for the trace
+        **kwargs
+            Additional arguments passed to go.Scatter
+            
+        Returns
+        -------
+        fig : go.Figure
+            The plotly figure
+        """
+        fig = fig or go.Figure()
+        fig.update_layout(
+            showlegend=kwargs.pop("show_legend", True),
+        )
+        fig.add_scatter(
+            x=self.frequencies,
+            y=self.mtf_values,
+            mode="lines",
+            name=name,
+            **kwargs,
+        )
+        fig.update_layout(
+            xaxis_title=x_label,
+            yaxis_title=y_label,
+        )
+        add_title(fig, title)
+        return fig
+    
+    def plot(
+        self,
+        axis: plt.Axes | None = None,
+        grid: bool = True,
+        x_label: str = "Spatial Frequency (cycles/mm)",
+        y_label: str = "MTF",
+        title: str = "Edge-based MTF (IEC 62220-1-1:2015)",
+        label: str = "MTF",
+    ) -> plt.Line2D:
+        """Plot the MTF using matplotlib.
+        
+        Parameters
+        ----------
+        axis : plt.Axes, optional
+            Matplotlib axis to plot on. If None, creates new figure.
+        grid : bool
+            Whether to show grid
+        x_label : str
+            Label for x-axis
+        y_label : str
+            Label for y-axis
+        title : str
+            Plot title
+        label : str
+            Label for the line
+            
+        Returns
+        -------
+        line : plt.Line2D
+            The plotted line object
+        """
+        if axis is None:
+            fig, axis = plt.subplots()
+        
+        line = axis.plot(self.frequencies, self.mtf_values, label=label)[0]
+        axis.grid(grid)
+        axis.set_xlabel(x_label)
+        axis.set_ylabel(y_label)
+        axis.set_title(title)
+        axis.set_ylim([0, 1.05])
+        axis.legend()
+        plt.tight_layout()
+        
+        return line
+    
+    def plot_esf(
+        self,
+        axis: plt.Axes | None = None,
+        grid: bool = True,
+    ) -> plt.Line2D:
+        """Plot the Edge Spread Function.
+        
+        Parameters
+        ----------
+        axis : plt.Axes, optional
+            Matplotlib axis to plot on. If None, creates new figure.
+        grid : bool
+            Whether to show grid
+            
+        Returns
+        -------
+        line : plt.Line2D
+            The plotted line object
+        """
+        if axis is None:
+            fig, axis = plt.subplots()
+        
+        line = axis.plot(self.esf_positions, self.esf, label="ESF")[0]
+        axis.grid(grid)
+        axis.set_xlabel("Position (pixels)")
+        axis.set_ylabel("Normalized Intensity")
+        axis.set_title("Edge Spread Function")
+        axis.legend()
+        plt.tight_layout()
+        
+        return line
+    
+    def plot_lsf(
+        self,
+        axis: plt.Axes | None = None,
+        grid: bool = True,
+    ) -> plt.Line2D:
+        """Plot the Line Spread Function.
+        
+        Parameters
+        ----------
+        axis : plt.Axes, optional
+            Matplotlib axis to plot on. If None, creates new figure.
+        grid : bool
+            Whether to show grid
+            
+        Returns
+        -------
+        line : plt.Line2D
+            The plotted line object
+        """
+        if axis is None:
+            fig, axis = plt.subplots()
+        
+        line = axis.plot(self.lsf, label="LSF")[0]
+        axis.grid(grid)
+        axis.set_xlabel("Position (pixels)")
+        axis.set_ylabel("Amplitude")
+        axis.set_title("Line Spread Function")
+        axis.legend()
+        plt.tight_layout()
+        
+        return line
+
