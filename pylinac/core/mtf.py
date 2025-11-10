@@ -465,9 +465,6 @@ class EdgeMTF:
         min_dist, max_dist = distances.min(), distances.max()
         n_bins = int((max_dist - min_dist) * oversampling_factor)
         
-        # Inform user about binning
-        print(f"ESF extraction: Creating {n_bins} bins with {oversampling_factor}x oversampling")
-        
         bin_edges = np.linspace(min_dist, max_dist, n_bins + 1)
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         
