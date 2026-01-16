@@ -363,12 +363,16 @@ class EdgeMTF:
         self._calculate_mtf()
     
     def _find_edge_angle(self) -> tuple[float, bool]:
-        """Find the angle of the edge and determine orientation.
+        """Find the angle of the edge using PCA and determine orientation.
+        
+        Uses Principal Component Analysis (PCA) to find the edge direction by
+        analyzing the distribution of edge points. This is more robust than
+        simple line fitting, especially with noisy data.
         
         Returns
         -------
         angle : float
-            Angle of the edge in radians relative to vertical
+            Angle of the edge in radians (absolute value)
         is_vertical : bool
             True if edge is closer to vertical, False if closer to horizontal
         """
@@ -394,33 +398,65 @@ class EdgeMTF:
                 "Insufficient edge points detected. Check image quality and contrast."
             )
         
-        # Fit a line to edge points to determine angle
-        # y = mx + b -> angle = arctan(m)
-        coeffs = np.polyfit(x_coords, y_coords, 1)
-        slope = coeffs[0]
-        angle = np.arctan(slope)
+        # Principal Component Analysis (PCA) for robust edge angle detection
+        # Center the edge coordinates (critical step!)
+        edge_coords_centered = np.column_stack([
+            x_coords - np.mean(x_coords), 
+            y_coords - np.mean(y_coords)
+        ])
         
-        # Determine if edge is primarily vertical or horizontal
-        # Vertical edge: angle close to ±90°, horizontal edge: angle close to 0°
-        is_vertical = abs(angle) > np.pi / 4
+        # Compute covariance matrix of the centered coordinates
+        cov_matrix = np.cov(edge_coords_centered.T)
         
-        # Check if angle is in acceptable range (3-5 degrees from vertical/horizontal)
-        angle_deg = abs(np.degrees(angle))
+        # Find eigenvalues and eigenvectors
+        eigenvals, eigenvecs = np.linalg.eig(cov_matrix)
+        
+        # Principal direction is the eigenvector with largest eigenvalue
+        principal_idx = np.argmax(eigenvals)
+        principal_direction = eigenvecs[:, principal_idx]
+        
+        # Calculate angle of principal direction
+        angle_rad = np.arctan2(principal_direction[1], principal_direction[0])
+        angle_deg = np.degrees(angle_rad)
+        
+        # Work with absolute values - we don't care about sign
+        angle_rad_abs = abs(angle_rad)
+        angle_deg_abs = abs(angle_deg)
+        
+        # Determine orientation based on absolute angle (> 45° is vertical)
+        is_vertical = angle_deg_abs > 45
+        
+        # Calculate PCA confidence: ratio of largest to smallest eigenvalue
+        pca_confidence = eigenvals[principal_idx] / (eigenvals[1 - principal_idx] + 1e-9)
+        
+        # Store additional diagnostic information
+        self.edge_points_count = len(x_coords)
+        self.pca_confidence = float(pca_confidence)
+        self.edge_angle_deg = float(angle_deg_abs)
+        
+        # Check if angle is in acceptable range with orientation-specific thresholds
         if is_vertical:
-            angle_from_vertical = abs(90 - angle_deg)
-            if angle_from_vertical > 10:
+            # Vertical edge: optimal range is 85-87°
+            if angle_deg_abs < 85 or angle_deg_abs > 87:
                 warnings.warn(
-                    f"Edge angle ({angle_from_vertical:.1f}° from vertical) is outside "
-                    f"recommended range (3-5°). Results may be less accurate."
+                    f"Vertical edge angle ({angle_deg_abs:.1f}°) is outside "
+                    f"optimal range (85-87°). Results may be less accurate."
                 )
         else:
-            if angle_deg > 10:
+            # Horizontal edge: optimal range is 3-5°
+            if angle_deg_abs < 3 or angle_deg_abs > 5:
                 warnings.warn(
-                    f"Edge angle ({angle_deg:.1f}° from horizontal) is outside "
-                    f"recommended range (3-5°). Results may be less accurate."
+                    f"Horizontal edge angle ({angle_deg_abs:.1f}°) is outside "
+                    f"optimal range (3-5°). Results may be less accurate."
                 )
         
-        return angle, is_vertical
+        # Warn if PCA confidence is low
+        if pca_confidence < 2.0:
+            warnings.warn(
+                f"Low PCA confidence ({pca_confidence:.2f}). Edge may be poorly defined or noisy."
+            )
+        
+        return angle_rad_abs, is_vertical
     
     def _extract_esf(self, angle: float, is_vertical: bool) -> tuple[np.ndarray, np.ndarray]:
         """Extract Edge Spread Function by projecting perpendicular to edge.
