@@ -372,7 +372,7 @@ class EdgeMTF:
         Returns
         -------
         angle : float
-            Angle of the edge in radians (absolute value)
+            Angle of the edge in radians (with sign preserved for geometric calculations)
         is_vertical : bool
             True if edge is closer to vertical, False if closer to horizontal
         """
@@ -419,8 +419,7 @@ class EdgeMTF:
         angle_rad = np.arctan2(principal_direction[1], principal_direction[0])
         angle_deg = np.degrees(angle_rad)
         
-        # Work with absolute values - we don't care about sign
-        angle_rad_abs = abs(angle_rad)
+        # Store absolute value for display/diagnostics only
         angle_deg_abs = abs(angle_deg)
         
         # Determine orientation based on absolute angle (> 45° is vertical)
@@ -432,7 +431,7 @@ class EdgeMTF:
         # Store additional diagnostic information
         self.edge_points_count = len(x_coords)
         self.pca_confidence = float(pca_confidence)
-        self.edge_angle_deg = float(angle_deg_abs)
+        self.edge_angle_deg = float(angle_deg_abs)  # Absolute value for display
         
         # Check if angle is in acceptable range with orientation-specific thresholds
         if is_vertical:
@@ -456,7 +455,8 @@ class EdgeMTF:
                 f"Low PCA confidence ({pca_confidence:.2f}). Edge may be poorly defined or noisy."
             )
         
-        return angle_rad_abs, is_vertical
+        # Return angle with sign preserved for geometric calculations
+        return angle_rad, is_vertical
     
     def _extract_esf(self, angle: float, is_vertical: bool) -> tuple[np.ndarray, np.ndarray]:
         """Extract Edge Spread Function by projecting perpendicular to edge.
