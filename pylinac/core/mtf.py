@@ -9,8 +9,10 @@ import numpy as np
 import plotly.graph_objects as go
 from matplotlib import pyplot as plt
 from scipy.interpolate import interp1d
-from scipy.ndimage import sobel, gaussian_filter1d
+from scipy.ndimage import sobel, gaussian_filter1d, gaussian_filter
 from scipy.optimize import curve_fit
+from skimage.feature import canny
+from skimage.transform import hough_line, hough_line_peaks
 
 from .contrast import michelson
 from .plotly_utils import add_title
@@ -363,11 +365,14 @@ class EdgeMTF:
         self._calculate_mtf()
     
     def _find_edge_angle(self) -> tuple[float, bool]:
-        """Find the angle of the edge using PCA and determine orientation.
+        """Find the angle of the edge using Hough Transform and determine orientation.
         
-        Uses Principal Component Analysis (PCA) to find the edge direction by
-        analyzing the distribution of edge points. This is more robust than
-        simple line fitting, especially with noisy data.
+        Uses Hough line transform to detect the edge angle. This method is more robust
+        than PCA because it:
+        - Works with partial edges
+        - Is insensitive to ROI boundary artifacts
+        - Is independent of ROI aspect ratio
+        - Handles noise better through voting mechanism
         
         Returns
         -------
@@ -376,62 +381,79 @@ class EdgeMTF:
         is_vertical : bool
             True if edge is closer to vertical, False if closer to horizontal
         """
-        # Use Sobel operators to find edge gradient
-        sobel_h = sobel(self.edge_data_norm, axis=0)  # horizontal gradients
-        sobel_v = sobel(self.edge_data_norm, axis=1)  # vertical gradients
+        # Apply Canny edge detection with adaptive parameters
+        sigma = 2.0
+        edges = canny(self.edge_data_norm, sigma=sigma, low_threshold=0.1, high_threshold=0.3)
         
-        # Find edge points above threshold
-        gradient_magnitude = np.sqrt(sobel_h**2 + sobel_v**2)
-        edge_threshold_grad = np.percentile(gradient_magnitude, 90)
-        edge_points = gradient_magnitude > edge_threshold_grad
+        # If no edges found, try with lower threshold
+        if not edges.any():
+            edges = canny(self.edge_data_norm, sigma=sigma, low_threshold=0.05, high_threshold=0.2)
         
-        if not edge_points.any():
+        # Fallback: use gradient-based edge detection
+        if not edges.any():
+            grad_y, grad_x = np.gradient(self.edge_data_norm)
+            gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+            threshold = np.percentile(gradient_magnitude, 90)
+            edges = gradient_magnitude > threshold
+        
+        if not edges.any():
             raise ValueError(
                 "Could not detect edge in image. Ensure edge has sufficient contrast."
             )
         
-        # Get coordinates of edge points
-        y_coords, x_coords = np.where(edge_points)
+        # Hough line transform with high precision (0.1° angular resolution)
+        angle_precision_deg = 0.1
+        tested_angles = np.linspace(
+            -np.pi / 2, np.pi / 2,
+            num=int(180 / angle_precision_deg),
+            endpoint=False
+        )
+        h, theta, d = hough_line(edges, theta=tested_angles)
         
-        if len(y_coords) < 10:
-            raise ValueError(
-                "Insufficient edge points detected. Check image quality and contrast."
-            )
+        # Find the strongest line (peak in Hough space)
+        hspace, angles, dists = hough_line_peaks(
+            h, theta, d, num_peaks=1, threshold=0.3 * h.max()
+        )
         
-        # Principal Component Analysis (PCA) for robust edge angle detection
-        # Center the edge coordinates (critical step!)
-        edge_coords_centered = np.column_stack([
-            x_coords - np.mean(x_coords), 
-            y_coords - np.mean(y_coords)
-        ])
+        if len(angles) == 0:
+            # Fallback: find global maximum
+            peak_idx = np.unravel_index(h.argmax(), h.shape)
+            normal_angle_rad = theta[peak_idx[1]]
+            hough_confidence = h[peak_idx] / h.max()
+        else:
+            normal_angle_rad = angles[0]
+            hough_confidence = hspace[0] / h.max()
         
-        # Compute covariance matrix of the centered coordinates
-        cov_matrix = np.cov(edge_coords_centered.T)
+        # CRITICAL: Hough returns the angle of the NORMAL (perpendicular) to the edge
+        # Convert from normal angle to edge angle by adding 90°
+        edge_angle_rad = normal_angle_rad + np.pi / 2
         
-        # Find eigenvalues and eigenvectors
-        eigenvals, eigenvecs = np.linalg.eig(cov_matrix)
+        # Normalize to [-π/2, π/2] range
+        if edge_angle_rad > np.pi / 2:
+            edge_angle_rad -= np.pi
+        elif edge_angle_rad < -np.pi / 2:
+            edge_angle_rad += np.pi
         
-        # Principal direction is the eigenvector with largest eigenvalue
-        principal_idx = np.argmax(eigenvals)
-        principal_direction = eigenvecs[:, principal_idx]
-        
-        # Calculate angle of principal direction
-        angle_rad = np.arctan2(principal_direction[1], principal_direction[0])
-        angle_deg = np.degrees(angle_rad)
-        
-        # Store absolute value for display/diagnostics only
+        # Convert to degrees for diagnostics
+        angle_deg = np.degrees(edge_angle_rad)
         angle_deg_abs = abs(angle_deg)
         
         # Determine orientation based on absolute angle (> 45° is vertical)
         is_vertical = angle_deg_abs > 45
         
-        # Calculate PCA confidence: ratio of largest to smallest eigenvalue
-        pca_confidence = eigenvals[principal_idx] / (eigenvals[1 - principal_idx] + 1e-9)
+        # Calculate edge strength: mean gradient magnitude at detected edge
+        grad_y, grad_x = np.gradient(self.edge_data_norm)
+        gradient_magnitude = gaussian_filter(
+            np.sqrt(grad_x**2 + grad_y**2), sigma=1.0
+        )
+        edge_strength = np.mean(gradient_magnitude[edges])
         
-        # Store additional diagnostic information
-        self.edge_points_count = len(x_coords)
-        self.pca_confidence = float(pca_confidence)
+        # Store diagnostic information
+        self.edge_points_count = int(np.sum(edges))
+        self.hough_confidence = float(hough_confidence)
+        self.edge_strength = float(edge_strength)
         self.edge_angle_deg = float(angle_deg_abs)  # Absolute value for display
+        self.angle_detection_method = "Hough Transform"
         
         # Check if angle is in acceptable range with orientation-specific thresholds
         if is_vertical:
@@ -449,14 +471,15 @@ class EdgeMTF:
                     f"optimal range (3-5°). Results may be less accurate."
                 )
         
-        # Warn if PCA confidence is low
-        if pca_confidence < 2.0:
+        # Warn if Hough confidence is low
+        if hough_confidence < 0.3:
             warnings.warn(
-                f"Low PCA confidence ({pca_confidence:.2f}). Edge may be poorly defined or noisy."
+                f"Low Hough confidence ({hough_confidence:.2f}). "
+                f"Edge may be poorly defined or noisy."
             )
         
         # Return angle with sign preserved for geometric calculations
-        return angle_rad, is_vertical
+        return edge_angle_rad, is_vertical
     
     def _extract_esf(self, angle: float, is_vertical: bool) -> tuple[np.ndarray, np.ndarray]:
         """Extract Edge Spread Function by projecting perpendicular to edge.
