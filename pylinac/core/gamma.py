@@ -251,9 +251,9 @@ def gamma_2d(
     evaluation
         The evaluation 2D array.
     dose_to_agreement
-        The dose to agreement in %. E.g. 1 is 1% of global reference max dose.
+        The dose to agreement criterion in %. E.g. 1 is 1% of global reference max dose.
     distance_to_agreement
-        The distance to agreement in **elements**. E.g. if the value is 4 this means 4 elements from the reference point under calculation.
+        The distance to agreement criterion in **elements**. E.g. if the value is 4 this means 4 elements from the reference point under calculation.
         Must be >0
     gamma_cap_value
         The value to cap the gamma at. E.g. a gamma of 5.3 will get capped to 2. Useful for displaying data with a consistent range.
